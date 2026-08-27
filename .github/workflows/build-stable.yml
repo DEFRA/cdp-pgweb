@@ -79,8 +79,3 @@ jobs:
           commit_hash_tag: "stable-${{ github.sha }}"
           desired_tag: stable
 
-      - name: Cleanup Local Containers
-        if: always()
-        uses: DEFRA/cdp-build-action/docker-build/cleanup-container@main
-        with:
-          container_name: ${{ env.ECR_IMAGE_NAME }}

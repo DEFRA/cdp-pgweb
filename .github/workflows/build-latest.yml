@@ -82,9 +82,3 @@ jobs:
           image_name: ${{ env.ECR_IMAGE_NAME }}
           commit_hash_tag: ${{ github.sha }}
           desired_tag: latest
-
-      - name: Cleanup Local Containers
-        if: always()
-        uses: DEFRA/cdp-build-action/docker-build/cleanup-container@main
-        with:
-          container_name: ${{ env.ECR_IMAGE_NAME }}
