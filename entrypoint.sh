@@ -12,4 +12,4 @@ export PGSSLMODE="${PGSSLMODE:=require}"
 
 echo "${PGUSER}@${PG_HOST}:${PGPORT}/${PGDATABASE}"
 
-/usr/bin/pgweb -s --prefix="$TOKEN" --log-format=json --host="$PGHOST" --port="$PGPORT" --user="$PGUSER" --pass="$PGPASSWORD" --db="$PGDATABASE" --listen="$PORT" --bind=0.0.0.0 --no-idle-timeout --cors --readonly
+/usr/bin/pgweb -s --prefix="$TOKEN" --log-format=json --host="$PGHOST" --port="$PGPORT" --user="$PGUSER" --pass="$PGPASSWORD" --db="$PGDATABASE" --listen="$PORT" --bind=0.0.0.0 --no-idle-timeout --cors --readonly --lock-session
