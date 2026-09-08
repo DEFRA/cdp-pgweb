@@ -15,7 +15,7 @@ RUN cd ./aws-rds-proxy && CGO_ENABLED=0 go build -ldflags="-s -w"  -trimpath -o 
 FROM sosedoff/pgweb:0.17.0
 
 COPY --from=aws-rds-tools /go/aws-rds-token/aws-rds-token /usr/local/bin/aws-rds-token
-COPY --from=aws-rds-tools /go/aws-rds-proxy/aws-rds-proxy /usr/local/bin/aws-rds-token
+COPY --from=aws-rds-tools /go/aws-rds-proxy/aws-rds-proxy /usr/local/bin/aws-rds-proxy
 COPY entrypoint.sh /entrypoint.sh
 
 ENTRYPOINT [ "/entrypoint.sh" ]
