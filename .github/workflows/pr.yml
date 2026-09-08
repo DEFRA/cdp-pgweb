@@ -36,8 +36,3 @@ jobs:
           image_name: ${{ env.ECR_IMAGE_NAME }}
           tag: ${{ env.LOCAL_TAG }}
 
-      - name: Cleanup
-        if: always()
-        uses: DEFRA/cdp-build-action/docker-build/cleanup-container@main
-        with:
-          container_name: ${{ env.ECR_IMAGE_NAME }}
