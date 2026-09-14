@@ -15,7 +15,7 @@ import (
 	"flag"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net"
 	"os"
 	"os/signal"
@@ -30,17 +30,11 @@ import (
 	"github.com/aws/aws-sdk-go-v2/feature/rds/auth"
 )
 
-// ============================================================================
-// Password Provider Stub
-// ============================================================================
-
-// getPassword returns the password (or auth token) for the specified user.
-// Stub implementation to be customized by the user (e.g., generating AWS RDS IAM auth tokens).
-func getPassword(user string, cfg *Config) (string, error) {
-	token, err := auth.BuildAuthToken(context.Background(), cfg.TargetAddr, cfg.Region, user, cfg.Credentials)
-	log.Printf("[auth] getPassword called for user: %q", user)
-	return token, err
+var PasswordCache = &SafeCache{
+	items: make(map[string]CachedItem),
 }
+
+var logger *slog.Logger
 
 // ============================================================================
 // PostgreSQL Protocol Constants
@@ -88,6 +82,52 @@ type StartupInfo struct {
 	User       string
 	Database   string
 	Parameters map[string]string
+}
+
+type CachedItem struct {
+	Value   string
+	Created time.Time
+}
+
+type SafeCache struct {
+	mu    sync.RWMutex
+	items map[string]CachedItem
+}
+
+// IAM RDS token
+func getRdsToken(user string, cfg *Config) (string, error) {
+	token, err := auth.BuildAuthToken(context.Background(), cfg.TargetAddr, cfg.Region, user, cfg.Credentials)
+	logger.Info("[auth] getPassword called for user: %q", user)
+	return token, err
+}
+
+func getPasswordFromCache(user string, cfg *Config) (string, error) {
+	PasswordCache.mu.RLock()
+	item, exists := PasswordCache.items[user]
+	PasswordCache.mu.RUnlock()
+
+	if exists && time.Since(item.Created) <= 13*time.Minute {
+		return item.Value, nil
+	}
+
+	newToken, err := getRdsToken(user, cfg)
+	if err != nil {
+		if exists {
+			PasswordCache.mu.Lock()
+			delete(PasswordCache.items, user)
+			PasswordCache.mu.Unlock()
+		}
+		return "", err
+	}
+
+	PasswordCache.mu.Lock()
+	PasswordCache.items[user] = CachedItem{
+		Value:   newToken,
+		Created: time.Now(),
+	}
+	PasswordCache.mu.Unlock()
+
+	return newToken, nil
 }
 
 // parseStartupParameters extracts null-terminated key-value pairs from the startup packet body.
@@ -632,22 +672,22 @@ func pbkdf2Sha256(password, salt []byte, iter, keyLen int) []byte {
 func handleClientConnection(client net.Conn, cfg *Config) {
 	defer client.Close()
 	clientRemote := client.RemoteAddr().String()
-	log.Printf("[%s] Accepted client connection", clientRemote)
+	logger.Info(fmt.Sprintf("[%s] Accepted client connection", clientRemote))
 
 	// Step 1: Read client startup message and parse user & database
 	info, err := handleClientHandshake(client)
 	if err != nil {
-		log.Printf("[%s] Handshake error: %v", clientRemote, err)
+		logger.Info(fmt.Sprintf("[%s] Handshake error: %v", clientRemote, err))
 		errResp := buildErrorResponse("FATAL", "08P01", err.Error())
 		_, _ = client.Write(errResp)
 		return
 	}
-	log.Printf("[%s] Received startup: user=%q database=%q", clientRemote, info.User, info.Database)
+	logger.Info(fmt.Sprintf("[%s] Received startup: user=%q database=%q", clientRemote, info.User, info.Database))
 
 	// Step 2: Obtain password for the user via getPassword stub
-	password, err := getPassword(info.User, cfg)
+	password, err := getPasswordFromCache(info.User, cfg)
 	if err != nil {
-		log.Printf("[%s] Error retrieving password for user %q: %v", clientRemote, info.User, err)
+		logger.Info(fmt.Sprintf("[%s] Error retrieving password for user %q: %v", clientRemote, info.User, err))
 		errResp := buildErrorResponse("FATAL", "28P01", fmt.Sprintf("failed to get password: %v", err))
 		_, _ = client.Write(errResp)
 		return
@@ -656,7 +696,7 @@ func handleClientConnection(client net.Conn, cfg *Config) {
 	// Step 3: Connect to target PostgreSQL database
 	target, err := connectTarget(cfg)
 	if err != nil {
-		log.Printf("[%s] Error connecting to target %s: %v", clientRemote, cfg.TargetAddr, err)
+		logger.Info(fmt.Sprintf("[%s] Error connecting to target %s: %v", clientRemote, cfg.TargetAddr, err))
 		errResp := buildErrorResponse("FATAL", "08006", fmt.Sprintf("cannot connect to backend: %v", err))
 		_, _ = client.Write(errResp)
 		return
@@ -665,14 +705,14 @@ func handleClientConnection(client net.Conn, cfg *Config) {
 
 	// Step 4: Authenticate with target PostgreSQL server
 	if err := authenticateTarget(target, client, info, password); err != nil {
-		log.Printf("[%s] Authentication with target failed: %v", clientRemote, err)
+		logger.Info(fmt.Sprintf("[%s] Authentication with target failed: %v", clientRemote, err))
 		return
 	}
-	log.Printf("[%s] Authenticated successfully with target. Starting bidirectional proxying...", clientRemote)
+	logger.Info(fmt.Sprintf("[%s] Authenticated successfully with target. Starting bidirectional proxying...", clientRemote))
 
 	// Step 5: Transparent bidirectional relay
 	relayConnections(client, target)
-	log.Printf("[%s] Client connection finished", clientRemote)
+	logger.Info(fmt.Sprintf("[%s] Client connection finished", clientRemote))
 }
 
 type closeWriter interface {
@@ -776,20 +816,22 @@ func main() {
 		Credentials:   awscfg.Credentials,
 	}
 
+	logger = slog.New(slog.NewJSONHandler(os.Stdout, nil))
+
 	listener, err := net.Listen("tcp", cfg.ListenAddr)
 	if err != nil {
-		log.Fatalf("Failed to bind on %s: %v", cfg.ListenAddr, err)
+		logger.Error(fmt.Sprintf("Failed to bind on %s: %v", cfg.ListenAddr, err))
 	}
 	defer listener.Close()
 
-	log.Printf("RDS PostgreSQL Proxy listening on %s -> forwarding to %s (sslmode=%s)", cfg.ListenAddr, cfg.TargetAddr, cfg.SSLMode)
+	logger.Info(fmt.Sprintf("RDS PostgreSQL Proxy listening on %s -> forwarding to %s (sslmode=%s)", cfg.ListenAddr, cfg.TargetAddr, cfg.SSLMode))
 
 	// Handle graceful shutdown
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, os.Interrupt, syscall.SIGTERM)
 	go func() {
 		<-sigChan
-		log.Println("Received termination signal, shutting down proxy...")
+		logger.Info("Received termination signal, shutting down proxy...")
 		listener.Close()
 		os.Exit(0)
 	}()
@@ -800,7 +842,7 @@ func main() {
 			if errors.Is(err, net.ErrClosed) {
 				break
 			}
-			log.Printf("Accept error: %v", err)
+			logger.Info("Accept error: %v", err)
 			continue
 		}
 		go handleClientConnection(conn, cfg)
