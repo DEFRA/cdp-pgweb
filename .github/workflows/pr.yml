@@ -15,7 +15,7 @@ jobs:
     env:
       AWS_REGION: eu-west-2
       AWS_ACCOUNT_ID: "094954420758"
-      ECR_IMAGE_NAME: "cdp-fluent-bit"
+      ECR_IMAGE_NAME: "cdp-pgweb"
       LOCAL_TAG: "test"
     defaults:
       run:
